@@ -249,7 +249,7 @@ class Subscription(SubscriptionBase):
         self._client_session = session or aiohttp.ClientSession()
 
     # pylint: disable=arguments-differ
-    def subscribe(self, requested_timeout=None, auto_renew=False):
+    def subscribe(self, requested_timeout=None, auto_renew=False, strict=True):
         """Subscribe to the service.
 
         If requested_timeout is provided, a subscription valid for that number
@@ -301,7 +301,7 @@ class Subscription(SubscriptionBase):
         asyncio.get_running_loop().call_soon(_wrap_action)
         return future
 
-    async def renew(self, requested_timeout=None, is_autorenew=False):  # pylint: disable=invalid-overridden-method
+    async def renew(self, requested_timeout=None, is_autorenew=False, strict=True):  # pylint: disable=invalid-overridden-method
         """renew(requested_timeout=None)
         Renew the event subscription.
         You should not try to renew a subscription which has been
@@ -338,7 +338,7 @@ class Subscription(SubscriptionBase):
                     self.auto_renew_fail(exc)
             raise
 
-    async def unsubscribe(self):  # pylint: disable=invalid-overridden-method
+    async def unsubscribe(self, strict=True):  # pylint: disable=invalid-overridden-method
         """unsubscribe()
         Unsubscribe from the service's events.
         Once unsubscribed, a Subscription instance should not be reused
