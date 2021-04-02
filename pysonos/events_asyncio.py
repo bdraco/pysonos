@@ -68,7 +68,6 @@ from __future__ import unicode_literals
 import sys
 import logging
 import socket
-from . import config
 
 # Hack to make docs build without twisted installed
 if "sphinx" in sys.modules:
@@ -134,8 +133,10 @@ class EventListener(EventListenerBase):
 
     def __init__(self):
         super().__init__()
-        #:  :py:class:`twisted.internet.tcp.Port`: set at `listen`
+        self.sock = None
         self.port = None
+        self.runner = None
+        self.site = None
 
     def start(self, any_zone):
         """Start the event listener listening on the local machine.
@@ -194,9 +195,9 @@ class EventListener(EventListenerBase):
 
         async def _async_start_site():
             handler = EventNotifyHandler()
-            self.app = aiohttp.web.Application()
-            aiohttp.app.add_routes([aiohttp.web.route("notify", "*", handler.notify)])
-            self.runner = aiohttp.web.AppRunner(self.app)
+            app = aiohttp.web.Application()
+            app.add_routes([aiohttp.web.route("notify", "*", handler.notify)])
+            self.runner = aiohttp.web.AppRunner(app)
             await self.runner.setup()
             self.site = aiohttp.web.SockSite(self.runner, self.sock)
             await self.site.start()
@@ -208,11 +209,11 @@ class EventListener(EventListenerBase):
     # pylint: disable=unused-argument
     def stop_listening(self, address):
         """Stop the listener."""
-        port, self.port = self.port, None
 
         async def _async_stop_site():
             await self.site.stop()
             await self.runner.cleanup()
+            self.port = None
 
         asyncio.create_task(_async_stop_site)
 
@@ -278,8 +279,19 @@ class Subscription(SubscriptionBase):
         self.subscriptions_map.subscribing()
         try:
             return await self._wrap(super().subscribe, requested_timeout, auto_renew)
-        except Exception as ex:
+        except SoCoException as ex:
+            raise
+        except Exception as ex:  # pylint: disable=broad-except
+            msg = (
+                "An Exception occurred. Subscription to"
+                + " {}, sid: {} has been cancelled".format(
+                    self.service.base_url + self.service.event_subscription_url,
+                    self.sid,
+                )
+            )
+            log.exception(msg)
             self._cancel_subscription(ex)
+            raise
         finally:
             self.subscriptions_map.finished_subscribing()
 
@@ -302,7 +314,23 @@ class Subscription(SubscriptionBase):
             The result of the renew
 
         """
-        return await self._wrap(super().renew, requested_timeout, is_autorenew)
+        try:
+            return await self._wrap(super().renew, requested_timeout, is_autorenew)
+        except Exception as exc:  # pylint: disable=broad-except
+            msg = (
+                "An Exception occurred. Subscription to"
+                + " {}, sid: {} has been cancelled".format(
+                    self.service.base_url + self.service.event_subscription_url,
+                    self.sid,
+                )
+            )
+            log.exception(msg)
+            self._cancel_subscription(msg)
+            if self.auto_renew_fail is not None:
+                if hasattr(self.auto_renew_fail, "__call__"):
+                    # pylint: disable=not-callable
+                    self.auto_renew_fail(exc)
+            raise
 
     async def unsubscribe(self):
         """unsubscribe()
@@ -384,7 +412,7 @@ class Subscription(SubscriptionBase):
         def _wrap_action():
             try:
                 future.set_result(method(*args))
-            except Exception as ex:
+            except Exception as ex:  # pylint: disable=broad-except
                 future.set_exception(ex)
 
         asyncio.get_running_loop().call_soon(_wrap_action)
