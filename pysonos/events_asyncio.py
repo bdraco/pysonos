@@ -24,8 +24,8 @@ Example:
         import soco
         from pprint import pprint
 
-        from soco import events_aiohttp
-        soco.config.EVENTS_MODULE = events_aiohttp
+        from soco import events_asyncio
+        soco.config.EVENTS_MODULE = events_asyncio
         from twisted.internet import reactor
 
         def print_event(event):
