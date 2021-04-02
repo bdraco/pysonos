@@ -68,7 +68,6 @@ from __future__ import unicode_literals
 import sys
 import logging
 import socket
-import functools
 
 # Hack to make docs build without twisted installed
 if "sphinx" in sys.modules:
@@ -112,18 +111,12 @@ class EventNotifyHandler(Resource, EventNotifyHandlerBase):
         # soco.events_base.EventNotifyHandlerBase.
         self.subscriptions_map = subscriptions_map
 
-    def render_NOTIFY(self, request):  # pylint: disable=invalid-name
+    async def notify(self, request):  # pylint: disable=invalid-name
         """Serve a ``NOTIFY`` request by calling `handle_notification`
         with the headers and content.
         """
-        headers = {}
-        for header in request.requestHeaders.getAllRawHeaders():
-            decoded_key = header[0].decode("utf8").lower()
-            decoded_header = header[1][0].decode("utf8")
-            headers[decoded_key] = decoded_header
-        content = request.content.read()
-        self.handle_notification(headers, content)
-        return b"OK"
+        self.handle_notification(request.headers, await request.text())
+        return aiohttp.web.Response(text="OK", status=200)
 
     # pylint: disable=no-self-use, missing-docstring
     def log_event(self, seq, service_id, timestamp):
@@ -184,17 +177,32 @@ class EventListener(EventListenerBase):
                 log.warning(e)
                 continue
 
-        if self.port:
-            log.info("Event listener running on %s", (ip_address, self.port))
-            return self.port
-        else:
+        if not self.port:
             return None
+
+        async def _async_start_site():
+            handler = EventNotifyHandler()
+            self.app = aiohttp.web.Application()
+            aiohttp.app.add_routes([aiohttp.web.route("notify", "*", handler.notify)])
+            self.runner = aiohttp.web.AppRunner(self.app)
+            await self.runner.setup()
+            self.site = aiohttp.web.SockSite(self.runner, self.sock)
+            await self.site.start()
+
+        asyncio.create_task(_async_start_site)
+        log.info("Event listener running on %s", (ip_address, self.port))
+        return self.port
 
     # pylint: disable=unused-argument
     def stop_listening(self, address):
         """Stop the listener."""
         port, self.port = self.port, None
-        port.stopListening()
+
+        async def _async_stop_site():
+            await self.site.stop()
+            await self.runner.cleanup()
+
+        asyncio.create_task(_async_stop_site)
 
 
 class Subscription(SubscriptionBase):
@@ -202,7 +210,7 @@ class Subscription(SubscriptionBase):
     Inherits from `soco.events_base.SubscriptionBase`.
     """
 
-    def __init__(self, service, event_queue=None, session=None):
+    def __init__(self, service, callback=None, session=None):
         """
         Args:
             service (Service): The SoCo `Service` to which the subscription
@@ -212,12 +220,12 @@ class Subscription(SubscriptionBase):
                 created and used.
 
         """
-        super().__init__(service, event_queue)
+        super().__init__(service, None)
         #: :py:obj:`function`: callback function to be called whenever an
         #: `Event` is received. If it is set and is callable, the callback
         #: function will be called with the `Event` as the only parameter and
         #: the Subscription's event queue won't be used.
-        self.callback = None
+        self.callback = callback
         # The SubscriptionsMapTwisted instance created when this module is
         # imported. This is referenced by soco.events_base.SubscriptionBase.
         self.subscriptions_map = subscriptions_map
