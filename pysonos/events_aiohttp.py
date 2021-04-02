@@ -68,6 +68,7 @@ from __future__ import unicode_literals
 import sys
 import logging
 import socket
+from . import config
 
 # Hack to make docs build without twisted installed
 if "sphinx" in sys.modules:
@@ -135,6 +136,17 @@ class EventListener(EventListenerBase):
         super().__init__()
         #:  :py:class:`twisted.internet.tcp.Port`: set at `listen`
         self.port = None
+
+    def start(self, any_zone):
+        """Start the event listener listening on the local machine.
+
+        Args:
+            any_zone (SoCo): Any Sonos device on the network. It does not
+                matter which device. It is used only to find a local IP
+                address reachable by the Sonos net.
+
+        """
+        return self._start(any_zone)
 
     def listen(self, ip_address):
         """Start the event listener listening on the local machine at
