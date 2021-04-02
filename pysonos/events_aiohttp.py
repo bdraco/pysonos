@@ -68,6 +68,7 @@ from __future__ import unicode_literals
 import sys
 import logging
 import socket
+import functools
 
 # Hack to make docs build without twisted installed
 if "sphinx" in sys.modules:
@@ -77,7 +78,8 @@ if "sphinx" in sys.modules:
 
 
 else:
-    from aiohttp import web
+    import asyncio
+    import aiohttp
 
 
 # Event is imported for compatibility with events.py
@@ -200,7 +202,7 @@ class Subscription(SubscriptionBase):
     Inherits from `soco.events_base.SubscriptionBase`.
     """
 
-    def __init__(self, service, event_queue=None):
+    def __init__(self, service, event_queue=None, session=None):
         """
         Args:
             service (Service): The SoCo `Service` to which the subscription
@@ -225,10 +227,10 @@ class Subscription(SubscriptionBase):
         # Used to keep track of the auto_renew loop
         self._auto_renew_loop = None
         # Used to serialise calls to subscribe, renew and unsubscribe
-        self._queue = []
+        self._client_session = session or aiohttp.ClientSession()
 
     # pylint: disable=arguments-differ
-    def subscribe(self, requested_timeout=None, auto_renew=False, strict=True):
+    async def subscribe(self, requested_timeout=None, auto_renew=False):
         """Subscribe to the service.
 
         If requested_timeout is provided, a subscription valid for that number
@@ -248,24 +250,20 @@ class Subscription(SubscriptionBase):
             requested_timeout(int, optional): The timeout to be requested.
             auto_renew (bool, optional): If `True`, renew the subscription
                 automatically shortly before timeout. Default `False`.
-            strict (bool, optional): If True and an Exception occurs during
-                execution, the returned Deferred_ will fail with a Failure_
-                which will be passed to the applicable errback (if any has
-                been set by the calling code) or, if False, the Failure will
-                be logged and the Subscription instance will be passed to
-                the applicable callback (if any has
-                been set by the calling code). Default `True`.
 
         Returns:
-            Deferred_: A Deferred_ the result of which will be the
-            Subscription instance and the subscription property of which
-            will point to the Subscription instance.
+            The result of the subscription
 
         """
-        subscribe = super().subscribe
-        return self._wrap(subscribe, strict, requested_timeout, auto_renew)
+        self.subscriptions_map.subscribing()
+        try:
+            return await self._wrap(super().subscribe, requested_timeout, auto_renew)
+        except Exception as ex:
+            self._cancel_subscription(ex)
+        finally:
+            self.subscriptions_map.finished_subscribing()
 
-    def renew(self, requested_timeout=None, is_autorenew=False, strict=True):
+    async def renew(self, requested_timeout=None, is_autorenew=False):
         """renew(requested_timeout=None)
         Renew the event subscription.
         You should not try to renew a subscription which has been
@@ -279,24 +277,14 @@ class Subscription(SubscriptionBase):
                 requested on subscription.
             is_autorenew (bool, optional): Whether this is an autorenewal.
                 Default `False`.
-            strict (bool, optional): If True and an Exception occurs during
-                execution, the returned Deferred_ will fail with a Failure_
-                which will be passed to the applicable errback (if any has
-                been set by the calling code) or, if False, the Failure will
-                be logged and the Subscription instance will be passed to
-                the applicable callback (if any has
-                been set by the calling code). Default `True`.
 
         Returns:
-            Deferred_: A Deferred_ the result of which will be the
-            Subscription instance and the subscription property of which
-            will point to the Subscription instance.
+            The result of the renew
 
         """
-        renew = super().renew
-        return self._wrap(renew, strict, requested_timeout, is_autorenew)
+        return await self._wrap(super().renew, requested_timeout, is_autorenew)
 
-    def unsubscribe(self, strict=True):
+    async def unsubscribe(self):
         """unsubscribe()
         Unsubscribe from the service's events.
         Once unsubscribed, a Subscription instance should not be reused
@@ -313,25 +301,25 @@ class Subscription(SubscriptionBase):
                 been set by the calling code). Default `True`.
 
         Returns:
-            Deferred_: A Deferred_ the result of which will be the
-            Subscription instance and the subscription property of which
-            will point to the Subscription instance.
+            The result of the unsubscribe
+
         """
-        unsubscribe = super().unsubscribe
-        return self._wrap(unsubscribe, strict)
+        return await self._wrap(super().unsubscribe)
 
     def _auto_renew_start(self, interval):
         """Starts the auto_renew loop."""
-        self._auto_renew_loop = task.LoopingCall(
-            self.renew, is_autorenew=True, strict=False
+        self._auto_renew_loop = asyncio.get_running_loop().call_later(
+            interval, self._auto_renew_run, interval
         )
-        # False means wait for the interval to elapse, rather than fire at once
-        self._auto_renew_loop.start(interval, False)
+
+    def _auto_renew_run(self, interval):
+        asyncio.create_task(self.renew(is_autorenew=True))
+        self._auto_renew_start(interval)
 
     def _auto_renew_cancel(self):
         """Cancels the auto_renew loop"""
         if self._auto_renew_loop:
-            self._auto_renew_loop.stop()
+            self._auto_renew_loop.cancel()
             self._auto_renew_loop = None
 
     # pylint: disable=no-self-use, too-many-branches, too-many-arguments
@@ -348,8 +336,6 @@ class Subscription(SubscriptionBase):
                 of response headers as its only parameter.
 
         """
-        agent = BrowserLikeRedirectAgent(Agent(reactor))
-
         if headers:
             for k in headers.keys():
                 header = headers[k]
@@ -361,151 +347,31 @@ class Subscription(SubscriptionBase):
                     k = k.encode("latin-1")
                 headers[k] = [header]
 
-        args = (method.encode("latin-1"), url.encode("latin-1"), Headers(headers))
-        d = agent.request(*args)  # pylint: disable=invalid-name
+        async def _make_request():
+            response = await self._client_session.request(
+                method.encode("latin-1"), url.encode("latin-1"), headers
+            )
+            if response.ok:
+                success(response.headers)
 
-        def on_success(response):  # pylint: disable=missing-docstring
-            response_headers = {}
-            for header in response.headers.getAllRawHeaders():
-                decoded_key = header[0].decode("utf8").lower()
-                decoded_header = header[1][0].decode("utf8")
-                response_headers[decoded_key] = decoded_header
-            success(response_headers)
-            return self
+        return _make_request
 
-        d.addCallback(on_success)
-        return d
+    async def _wrap(self, method, *args):
 
-    def _wrap(self, method, strict, *args, **kwargs):
+        """Wrap a call into an awaitable."""
+        future = asyncio.Future()
 
-        """This is a wrapper for `Subscription.subscribe`, `Subscription.renew`
-        and `Subscription.unsubscribe` which:
+        def _wrap_action():
+            try:
+                future.set_result(method(*args))
+            except Exception as ex:
+                future.set_exception(ex)
 
-            * Returns a deferred, the result of which will be the`Subscription`
-              instance.
-            * Sets deferred.subscription to point to the `Subscription`
-              instance so a calling function can access the Subscription
-              instance immediately without registering a Callback and waiting
-              for it to fire.
-            * Converts an Exception into a twisted.python.failure.Failure.
-            * If a Failure (including an Exception converted into a Failure)
-              has occurred:
-
-                * Cancels the Subscription (unless the Failure was caused by a
-                  SoCoException upon subscribe).
-                * On an autorenew, if the strict flag was set to False, calls
-                  the optional self.auto_renew_fail method with the
-                  Failure.
-                * If the strict flag was set to True (the default), passes the
-                  Failure to the next Errback for handling or, if the strict
-                  flag was set to False, logs the Failure instead.
-
-            * Calls the `subscribing` and `finished_subscribing` methods of
-              self.subscriptions_map, so that `count` property of
-              self.subscriptions_map includes pending subscriptions.
-            * Serialises calls to the wrapped methods, so that, for example, a
-              call to unsubscribe will not commence until a call to subscribe
-              has completed.
-
-        """
-        action = method.__name__
-
-        # pylint: disable=unused-argument
-        def execute(result, method, *args, **kwargs):
-            """Execute method"""
-            # Increment the counter of pending calls to Subscription.subscribe
-            # if method is subscribe
-            if method.__name__ == "subscribe":
-                self.subscriptions_map.subscribing()
-
-            # Execute method
-            return method(*args, **kwargs)
-
-        def callnext():
-            """Call the next deferred in the queue."""
-            # If there is another deferred in the queue,
-            # call it
-            if self._queue:
-                d = self._queue[0]  # pylint: disable=invalid-name
-                d.callback(None)
-
-        def handle_outcome(outcome):
-            """A callback / errback to handle the outcome ofmethod,
-            after it has been executed
-            """
-            # We start by assuming no Failure occurred
-            failure = None
-
-            if isinstance(outcome, Failure):
-                failure = outcome
-                # If a Failure or Exception occurred during execution of
-                # subscribe, renew or unsubscribe, cancel it unless the
-                # Failure or Exception was a SoCoException upon subscribe
-                if failure.type != SoCoException or action == "renew":
-                    msg = (
-                        "An Exception occurred. Subscription to"
-                        + " {}, sid: {} has been cancelled".format(
-                            self.service.base_url + self.service.event_subscription_url,
-                            self.sid,
-                        )
-                    )
-                    self._cancel_subscription(msg)
-                # If we're not being strict, log the Failure
-                if not strict:
-                    msg = (
-                        "Failure received in Subscription"
-                        + ".{} for Subscription to:\n{}, sid: {}: {}".format(
-                            action,
-                            self.service.base_url + self.service.event_subscription_url,
-                            self.sid,
-                            str(failure),
-                        )
-                    )
-                    log.exception(msg)
-                    # If we're not being strict upon a renewal
-                    # (e.g. an autorenewal) call the optional
-                    # self.auto_renew_fail method, if it has been set
-                    if action == "renew":
-                        if self.auto_renew_fail:
-                            if hasattr(self.auto_renew_fail, "__call__"):
-                                # pylint: disable=not-callable
-                                self.auto_renew_fail(failure)
-
-            # Decrement the counter of pending calls to Subscription.subscribe
-            # if completed action was subscribe
-            if action == "subscribe":
-                self.subscriptions_map.finished_subscribing()
-
-            # Remove the previous deferred from the queue
-            self._queue.pop(0)
-
-            # And call the next deferred in the queue
-            callnext()
-
-            # If a Failure occurred and we're in strict mode, reraise it
-            if failure and strict:
-                failure.trap()
-
-        # Create a deferred
-        d = defer.Deferred()  # pylint: disable=invalid-name
-        # Set its subscription property to refer to this Subscription
-        d.subscription = self
-        # Set the deferred to execute method, when the
-        # deferred is called
-        d.addCallback(execute, method, *args, **kwargs)
-        # Add handle_outcome as both a callback and errback
-        d.addBoth(handle_outcome)
-        # Add the deferred to the queue
-        self._queue.append(d)
-        # If this is the only deferred in the queue,
-        # call it
-        if len(self._queue) == 1:
-            callnext()
-        # Return the deferred
-        return d
+        asyncio.get_running_loop().call_soon(_wrap_action)
+        return await future
 
 
-class SubscriptionsMapTwisted(SubscriptionsMap):
+class SubscriptionsMapAio(SubscriptionsMap):
     """Maintains a mapping of sids to `soco.events_twisted.Subscription`
     instances. Registers each subscription to be unsubscribed at exit.
 
@@ -532,9 +398,6 @@ class SubscriptionsMapTwisted(SubscriptionsMap):
         # Add the subscription to the local dict of subscriptions so it
         # can be looked up by sid
         self.subscriptions[subscription.sid] = subscription
-        # Register subscription to be unsubscribed at exit if still alive
-        # pylint: disable=no-member
-        reactor.addSystemEventTrigger("before", "shutdown", subscription.unsubscribe)
 
     def subscribing(self):
         """Called when the `Subscription.subscribe` method
@@ -558,5 +421,5 @@ class SubscriptionsMapTwisted(SubscriptionsMap):
         return len(self.subscriptions) + self._pending
 
 
-subscriptions_map = SubscriptionsMapTwisted()  # pylint: disable=C0103
+subscriptions_map = SubscriptionsMapAio()  # pylint: disable=C0103
 event_listener = EventListener()  # pylint: disable=C0103
