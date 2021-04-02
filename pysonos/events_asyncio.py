@@ -249,7 +249,7 @@ class Subscription(SubscriptionBase):
         self._client_session = session or aiohttp.ClientSession()
 
     # pylint: disable=arguments-differ
-    async def subscribe(self, requested_timeout=None, auto_renew=False):
+    def subscribe(self, requested_timeout=None, auto_renew=False):
         """Subscribe to the service.
 
         If requested_timeout is provided, a subscription valid for that number
@@ -275,25 +275,33 @@ class Subscription(SubscriptionBase):
 
         """
         self.subscriptions_map.subscribing()
-        try:
-            return await self._wrap(super().subscribe, requested_timeout, auto_renew)
-        except SoCoException as ex:
-            raise
-        except Exception as ex:  # pylint: disable=broad-except
-            msg = (
-                "An Exception occurred. Subscription to"
-                + " {}, sid: {} has been cancelled".format(
-                    self.service.base_url + self.service.event_subscription_url,
-                    self.sid,
-                )
-            )
-            log.exception(msg)
-            self._cancel_subscription(ex)
-            raise
-        finally:
-            self.subscriptions_map.finished_subscribing()
+        future = asyncio.Future()
+        subscribe = super().subscribe
 
-    async def renew(self, requested_timeout=None, is_autorenew=False):
+        def _wrap_action():
+            try:
+                subscribe(requested_timeout, auto_renew)
+                future.set_result(self)
+            except SoCoException as ex:
+                future.set_exception(ex)
+            except Exception as ex:  # pylint: disable=broad-except
+                msg = (
+                    "An Exception occurred. Subscription to"
+                    + " {}, sid: {} has been cancelled".format(
+                        self.service.base_url + self.service.event_subscription_url,
+                        self.sid,
+                    )
+                )
+                log.exception(msg)
+                self._cancel_subscription(ex)
+                future.set_exception(ex)
+            finally:
+                self.subscriptions_map.finished_subscribing()
+
+        asyncio.get_running_loop().call_soon(_wrap_action)
+        return future
+
+    async def renew(self, requested_timeout=None, is_autorenew=False):  # pylint: disable=invalid-overridden-method
         """renew(requested_timeout=None)
         Renew the event subscription.
         You should not try to renew a subscription which has been
@@ -330,7 +338,7 @@ class Subscription(SubscriptionBase):
                     self.auto_renew_fail(exc)
             raise
 
-    async def unsubscribe(self):
+    async def unsubscribe(self):  # pylint: disable=invalid-overridden-method
         """unsubscribe()
         Unsubscribe from the service's events.
         Once unsubscribed, a Subscription instance should not be reused
