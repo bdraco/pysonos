@@ -194,7 +194,7 @@ class EventListener(EventListenerBase):
         async def _async_start_site():
             handler = EventNotifyHandler()
             app = aiohttp.web.Application()
-            app.add_routes([aiohttp.web.route("notify", "*", handler.notify)])
+            app.add_routes([aiohttp.web.route("notify", "", handler.notify)])
             self.runner = aiohttp.web.AppRunner(app)
             await self.runner.setup()
             self.site = aiohttp.web.SockSite(self.runner, self.sock)
