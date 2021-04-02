@@ -171,10 +171,10 @@ class EventListener(EventListenerBase):
                 if port_number > self.requested_port_number:
                     log.warning("Trying next port (%d)", port_number)
                 # pylint: disable=no-member
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)   
-                sock.bind((ip_address, port_number))     
-                sock.listen(200)    
-                self.sock = sock  
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind((ip_address, port_number))
+                sock.listen(200)
+                self.sock = sock
                 self.port = port_number
                 break
             # pylint: disable=invalid-name
