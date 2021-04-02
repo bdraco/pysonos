@@ -97,12 +97,10 @@ from .exceptions import SoCoException  # noqa: E402
 log = logging.getLogger(__name__)  # pylint: disable=C0103
 
 
-class EventNotifyHandler(Resource, EventNotifyHandlerBase):
+class EventNotifyHandler(EventNotifyHandlerBase):
     """Handles HTTP ``NOTIFY`` Verbs sent to the listener server.
     Inherits from `soco.events_base.EventNotifyHandlerBase`.
     """
-
-    isLeaf = True
 
     def __init__(self):
         super().__init__()
