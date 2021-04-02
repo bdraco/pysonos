@@ -394,21 +394,9 @@ class Subscription(SubscriptionBase):
                 of response headers as its only parameter.
 
         """
-        if headers:
-            for k in headers.keys():
-                header = headers[k]
-                del headers[k]
-                if isinstance(header, (list,)):
-                    header = header[0]
-                if not isinstance(header, (bytes, bytearray)):
-                    header = header.encode("latin-1")
-                    k = k.encode("latin-1")
-                headers[k] = [header]
 
         async def _make_request():
-            response = await self._client_session.request(
-                method.encode("latin-1"), url.encode("latin-1"), headers
-            )
+            response = await self._client_session.request(method, url, headers)
             if response.ok:
                 success(response.headers)
 
